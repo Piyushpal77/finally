@@ -56,7 +56,7 @@ async def on_watchlist_remove(source: MarketDataSource, db: TrackedTickerStore, 
     position for this ticker — an open position keeps it priced even off the
     watchlist."""
     position = await db.get_position(ticker)
-    if position is None or position.quantity == 0:
+    if position is None or position.quantity <= 0:
         await source.remove_ticker(ticker)
 
 
@@ -70,9 +70,8 @@ async def on_trade_executed(source: MarketDataSource, db: TrackedTickerStore, ti
        that nothing references it, stop tracking it.
     """
     position = await db.get_position(ticker)
-    on_watchlist = await db.is_on_watchlist(ticker)
 
     if position and position.quantity > 0:
         await source.add_ticker(ticker)  # covers case 1; no-op if already tracked
-    elif not on_watchlist:
+    elif not await db.is_on_watchlist(ticker):
         await source.remove_ticker(ticker)  # covers case 2

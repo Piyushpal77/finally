@@ -232,6 +232,21 @@ class TestMassiveDataSource:
 
         assert cache.get_anchor("AAPL") == 190.50
 
+    async def test_zero_previous_close_falls_back_to_first_observed(self):
+        """A previous_close of 0.0 (thin snapshot / newly-listed ticker) must not be
+        treated as a real anchor, or day-change% would be pinned to a bogus baseline."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._tickers = ["AAPL"]
+        source._client = MagicMock()
+
+        snap = _make_snapshot("AAPL", 190.50, 1707580800000, previous_close=0.0)
+
+        with patch.object(source, "_fetch_snapshots", return_value=[snap]):
+            await source._poll_once()
+
+        assert cache.get_anchor("AAPL") == 190.50
+
     async def test_anchor_stays_sticky_across_polls(self):
         """Test that a later poll's previous_close does not overwrite the captured anchor."""
         cache = PriceCache()

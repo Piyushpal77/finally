@@ -30,6 +30,12 @@ class TestValidateTicker:
         with pytest.raises(InvalidTickerError):
             validate_ticker(raw)
 
+    def test_unicode_case_folding_expansion_rejected(self):
+        """'ß'.upper() == 'SS' would otherwise pass the 1-5-letter regex despite
+        being a single non-ASCII character, not 1-5 letters in the input."""
+        with pytest.raises(InvalidTickerError):
+            validate_ticker("ß")
+
     def test_error_message_includes_original_input(self):
         with pytest.raises(InvalidTickerError, match="NOT-A-TICKER"):
             validate_ticker("NOT-A-TICKER")

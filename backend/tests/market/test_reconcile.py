@@ -120,6 +120,15 @@ class TestOnWatchlistRemove:
         await on_watchlist_remove(source, db, "NOPE")
         assert source.remove_called
 
+    async def test_remove_watchlist_tiny_negative_quantity_removes(self):
+        """Guards against float drift (e.g. -1e-16) after a 'full' sell leaving
+        quantity just below zero instead of exactly 0.0."""
+        db = FakeDB()
+        db.set_position("AAPL", quantity=-1e-16)
+        source = FakeSource()
+        await on_watchlist_remove(source, db, "AAPL")
+        assert source.remove_called
+
 
 @pytest.mark.asyncio
 class TestOnTradeExecuted:
