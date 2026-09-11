@@ -23,7 +23,10 @@ def validate_ticker(raw: str) -> str:
         - LLM `trades[].ticker`             (chat-initiated trade)
         - LLM `watchlist_changes[].ticker`  (chat-initiated watchlist change)
     """
-    ticker = raw.strip().upper()
-    if not _TICKER_RE.match(ticker):
+    stripped = raw.strip()
+    ticker = stripped.upper()
+    # Some Unicode codepoints expand under .upper() (e.g. 'ß' -> 'SS'), which could
+    # otherwise slip a non-ASCII, non-letter input through the length/format check below.
+    if not stripped.isascii() or not _TICKER_RE.match(ticker):
         raise InvalidTickerError(f"Invalid ticker '{raw}': must be 1-5 letters (A-Z).")
     return ticker

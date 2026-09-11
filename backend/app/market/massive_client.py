@@ -102,12 +102,15 @@ class MassiveDataSource(MarketDataSource):
                     # Massive timestamps are Unix milliseconds → convert to seconds
                     timestamp = snap.last_trade.timestamp / 1000.0
 
-                    # Best-effort previous-close anchor. If the field is missing/None on
-                    # this snapshot (pre-market, a thin plan tier, a transient partial
-                    # response), fall back silently to PriceCache's own "first observed"
-                    # default by passing anchor=None — never let a missing anchor drop
-                    # the price update.
+                    # Best-effort previous-close anchor. If the field is missing/None/zero
+                    # on this snapshot (pre-market, a thin plan tier, a transient partial
+                    # response, a newly-listed ticker with no prior close), fall back
+                    # silently to PriceCache's own "first observed" default by passing
+                    # anchor=None — never let a missing anchor drop the price update, and
+                    # never anchor day-change math on a zero baseline.
                     anchor = getattr(getattr(snap, "day", None), "previous_close", None)
+                    if not anchor:
+                        anchor = None
 
                     self._cache.update(
                         ticker=snap.ticker,
