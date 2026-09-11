@@ -8,13 +8,17 @@ from app.market.cache import PriceCache
 from app.market.massive_client import MassiveDataSource
 
 
-def _make_snapshot(ticker: str, price: float, timestamp_ms: int) -> MagicMock:
+def _make_snapshot(
+    ticker: str, price: float, timestamp_ms: int, previous_close: float | None = None
+) -> MagicMock:
     """Create a mock Massive snapshot object."""
     snap = MagicMock()
     snap.ticker = ticker
     snap.last_trade = MagicMock()
     snap.last_trade.price = price
     snap.last_trade.timestamp = timestamp_ms
+    snap.day = MagicMock()
+    snap.day.previous_close = previous_close
     return snap
 
 
@@ -199,3 +203,48 @@ class TestMassiveDataSource:
         assert cache.get_price("AAPL") == 190.50
 
         await source.stop()
+
+    async def test_poll_captures_previous_close_as_anchor(self):
+        """Test that the snapshot's previous close is captured as the day-change anchor."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._tickers = ["AAPL"]
+        source._client = MagicMock()
+
+        snap = _make_snapshot("AAPL", 190.50, 1707580800000, previous_close=185.00)
+
+        with patch.object(source, "_fetch_snapshots", return_value=[snap]):
+            await source._poll_once()
+
+        assert cache.get_anchor("AAPL") == 185.00
+
+    async def test_missing_previous_close_falls_back_to_first_observed(self):
+        """Test that a missing previous close falls back to the first observed price."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._tickers = ["AAPL"]
+        source._client = MagicMock()
+
+        snap = _make_snapshot("AAPL", 190.50, 1707580800000, previous_close=None)
+
+        with patch.object(source, "_fetch_snapshots", return_value=[snap]):
+            await source._poll_once()
+
+        assert cache.get_anchor("AAPL") == 190.50
+
+    async def test_anchor_stays_sticky_across_polls(self):
+        """Test that a later poll's previous_close does not overwrite the captured anchor."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._tickers = ["AAPL"]
+        source._client = MagicMock()
+
+        first = _make_snapshot("AAPL", 190.50, 1707580800000, previous_close=185.00)
+        with patch.object(source, "_fetch_snapshots", return_value=[first]):
+            await source._poll_once()
+
+        second = _make_snapshot("AAPL", 191.00, 1707580860000, previous_close=999.00)
+        with patch.object(source, "_fetch_snapshots", return_value=[second]):
+            await source._poll_once()
+
+        assert cache.get_anchor("AAPL") == 185.00

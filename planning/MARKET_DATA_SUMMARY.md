@@ -1,10 +1,13 @@
 # Market Data Backend — Summary
 
-**Status:** Complete, tested, reviewed, all issues resolved.
+**Status:** Complete, tested, reviewed, all issues resolved. Updated to also cover the four
+follow-up items `planning/MARKET_DATA_DESIGN.md` and `planning/REVIEW.md` flagged as
+not-yet-built: the day-change **anchor**, ticker-format **validation**, SSE **keepalive**, and
+the watchlist ∪ open-positions **reconciliation** helper. See "Follow-Up Additions" below.
 
 ## What Was Built
 
-A complete market data subsystem in `backend/app/market/` (8 modules, ~500 lines) providing live price simulation and real market data via a unified interface.
+A complete market data subsystem in `backend/app/market/` (10 modules, ~700 lines) providing live price simulation and real market data via a unified interface.
 
 ### Architecture
 
@@ -32,7 +35,9 @@ MarketDataSource (ABC)
 | `simulator.py` | `GBMSimulator` (Geometric Brownian Motion with Cholesky-correlated moves) + `SimulatorDataSource` |
 | `massive_client.py` | `MassiveDataSource` — REST polling client for Polygon.io via the `massive` package |
 | `factory.py` | `create_market_data_source()` — selects simulator or Massive based on `MASSIVE_API_KEY` env var |
-| `stream.py` | `create_stream_router()` — FastAPI SSE endpoint factory using version-based change detection |
+| `stream.py` | `create_stream_router()` — FastAPI SSE endpoint factory using version-based change detection, plus a ~15s `: keepalive` comment when the cache is idle |
+| `validation.py` | `validate_ticker()` / `InvalidTickerError` — normalizes and enforces the 1-5 uppercase letter ticker format at every write path |
+| `reconcile.py` | `get_tracked_tickers()` / `on_watchlist_add()` / `on_watchlist_remove()` / `on_trade_executed()` — keeps the market source's tracked set in sync with watchlist ∪ open positions; DB-agnostic (duck-typed), for the platform layer to call |
 
 ### Key Design Decisions
 
@@ -44,18 +49,21 @@ MarketDataSource (ABC)
 
 ## Test Suite
 
-**73 tests, all passing.** 6 test modules in `backend/tests/market/`.
+9 test modules in `backend/tests/market/` (originally 73 tests across 6 modules; extended with
+anchor/validation/keepalive/reconcile coverage below — run `uv run --extra dev pytest -v` to get
+the current count and coverage in your environment).
 
-| Module | Tests | Coverage |
-|--------|-------|----------|
-| test_models.py | 11 | models.py: 100% |
-| test_cache.py | 13 | cache.py: 100% |
-| test_simulator.py | 17 | simulator.py: 98% |
-| test_simulator_source.py | 10 | (integration tests) |
-| test_factory.py | 7 | factory.py: 100% |
-| test_massive.py | 13 | massive_client.py: 56% (expected — API methods mocked) |
-
-Overall coverage: 84%.
+| Module | Covers |
+|--------|--------|
+| test_models.py | `PriceUpdate`, including day-change (`anchor`, `day_change`, `day_change_percent`) |
+| test_cache.py | `PriceCache`, including anchor capture/stickiness/eviction (`TestPriceCacheAnchor`) |
+| test_simulator.py | `GBMSimulator` math, correlation, unknown-ticker synthesis |
+| test_simulator_source.py | `SimulatorDataSource` integration |
+| test_factory.py | `create_market_data_source()` selection logic |
+| test_massive.py | `MassiveDataSource`, including previous-close → anchor plumbing |
+| test_validation.py | `validate_ticker()` / `InvalidTickerError` — new |
+| test_stream.py | `_generate_events()` SSE loop, including the keepalive timer — new |
+| test_reconcile.py | tracked-ticker reconciliation helpers against a fake DB/source — new |
 
 ## Code Review & Fixes Applied
 
@@ -68,6 +76,36 @@ A comprehensive code review identified 7 issues. All were resolved:
 5. **Correlation constants cleaned up** — removed unused `DEFAULT_CORR`, consolidated into `CROSS_GROUP_CORR`
 6. **Unused test imports removed** — `pytest`, `math`, `asyncio` cleaned from 4 test files
 7. **Massive test mocks fixed** — `source._client` set in tests, patches target correct names
+
+## Follow-Up Additions (day-change anchor, validation, keepalive, reconciliation)
+
+`planning/MARKET_DATA_DESIGN.md` and `planning/REVIEW.md` identified four pieces PLAN.md §6 and
+the Design Decisions Log call for that were not in the original build. All four are now
+implemented, per the design doc's specification:
+
+1. **Day-change anchor** — `PriceUpdate` gained a required `anchor` field plus `day_change` /
+   `day_change_percent` properties (distinct from the tick-to-tick `change` / `change_percent`).
+   `PriceCache` captures the anchor on a ticker's first write (previous close if Massive supplies
+   one via `snap.day.previous_close`, otherwise the first observed price) and keeps it sticky
+   across later updates; `remove()` drops it so re-tracking re-anchors fresh. `to_dict()` — and so
+   the SSE payload — now includes `anchor`, `day_change`, `day_change_percent`.
+2. **Ticker validation** — new `validation.py` with `validate_ticker()` / `InvalidTickerError`,
+   enforcing the `^[A-Z]{1,5}$` format. Scoped to the API boundary per the design doc: the
+   simulator's unknown-ticker synthesis (`SEED_PRICES.get(ticker, random.uniform(50, 300))`)
+   stays permissive internally and was already correct.
+3. **SSE keepalive** — `stream.py`'s `_generate_events()` now tracks the wall-clock time since
+   the last byte sent and emits a `: keepalive\n\n` comment after `KEEPALIVE_INTERVAL` (15s,
+   configurable) of no price changes, so the frontend's connection-status indicator can tell an
+   idle stream from a dropped one.
+4. **Watchlist ∪ open-positions reconciliation** — new `reconcile.py` with `get_tracked_tickers()`,
+   `on_watchlist_add()`, `on_watchlist_remove()`, `on_trade_executed()`. These are intentionally
+   DB-agnostic (a `TrackedTickerStore` `Protocol` with `get_watchlist_tickers` /
+   `get_open_position_tickers` / `get_position` / `is_on_watchlist`) since no database module
+   exists yet — the backend platform agent wires in the real DB implementation and calls these
+   helpers from the watchlist/trade routes and at startup, per §13 of `MARKET_DATA_DESIGN.md`.
+
+All four are additive (new optional kwargs, new modules) — no existing call site outside the
+market package needed to change.
 
 ## Demo
 
@@ -101,4 +139,28 @@ await source.remove_ticker("GOOGL")
 
 # Shutdown
 await source.stop()
+```
+
+```python
+from app.market import InvalidTickerError, validate_ticker
+
+# At every write path that accepts a ticker (watchlist add, trade, LLM actions)
+try:
+    ticker = validate_ticker(raw_ticker)
+except InvalidTickerError as e:
+    ...  # 400 for manual API calls; folded into the per-action chat result for LLM actions
+```
+
+```python
+from app.market import get_tracked_tickers, on_trade_executed, on_watchlist_add, on_watchlist_remove
+
+# `db` is anything exposing get_watchlist_tickers / get_open_position_tickers /
+# get_position / is_on_watchlist (see reconcile.py) — supplied by the platform's DB module.
+initial_tickers = await get_tracked_tickers(db)
+await source.start(initial_tickers)
+
+# After the DB transaction commits in each write path:
+await on_watchlist_add(source, ticker)
+await on_watchlist_remove(source, db, ticker)
+await on_trade_executed(source, db, ticker)
 ```

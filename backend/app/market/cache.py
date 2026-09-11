@@ -17,24 +17,42 @@ class PriceCache:
 
     def __init__(self) -> None:
         self._prices: dict[str, PriceUpdate] = {}
+        self._anchors: dict[str, float] = {}  # ticker -> day-change baseline
         self._lock = Lock()
         self._version: int = 0  # Monotonically increasing; bumped on every update
 
-    def update(self, ticker: str, price: float, timestamp: float | None = None) -> PriceUpdate:
+    def update(
+        self,
+        ticker: str,
+        price: float,
+        timestamp: float | None = None,
+        anchor: float | None = None,
+    ) -> PriceUpdate:
         """Record a new price for a ticker. Returns the created PriceUpdate.
 
         Automatically computes direction and change from the previous price.
         If this is the first update for the ticker, previous_price == price (direction='flat').
+
+        `anchor`, when given, is the day-change baseline for this ticker (e.g. Massive's
+        previous close). It is captured only on the *first* update seen for a ticker — later
+        calls ignore the argument and keep whatever anchor was captured first, so day-change
+        stays stable across a session (it only re-anchors if the ticker is removed and later
+        re-tracked). If no anchor is given (simulator mode, or a briefly missing previous
+        close), the anchor defaults to this call's `price` — "first observed price."
         """
         with self._lock:
             ts = timestamp or time.time()
             prev = self._prices.get(ticker)
             previous_price = prev.price if prev else price
 
+            if ticker not in self._anchors:
+                self._anchors[ticker] = round(anchor if anchor is not None else price, 2)
+
             update = PriceUpdate(
                 ticker=ticker,
                 price=round(price, 2),
                 previous_price=round(previous_price, 2),
+                anchor=self._anchors[ticker],
                 timestamp=ts,
             )
             self._prices[ticker] = update
@@ -45,6 +63,11 @@ class PriceCache:
         """Get the latest price for a single ticker, or None if unknown."""
         with self._lock:
             return self._prices.get(ticker)
+
+    def get_anchor(self, ticker: str) -> float | None:
+        """The captured day-change baseline for a ticker, or None if untracked."""
+        with self._lock:
+            return self._anchors.get(ticker)
 
     def get_all(self) -> dict[str, PriceUpdate]:
         """Snapshot of all current prices. Returns a shallow copy."""
@@ -57,9 +80,14 @@ class PriceCache:
         return update.price if update else None
 
     def remove(self, ticker: str) -> None:
-        """Remove a ticker from the cache (e.g., when removed from watchlist)."""
+        """Remove a ticker from the cache (e.g., when removed from watchlist).
+
+        Also drops its anchor: if the ticker is re-tracked later, it re-anchors fresh
+        from that moment — consistent with "first observed price after tracking started."
+        """
         with self._lock:
             self._prices.pop(ticker, None)
+            self._anchors.pop(ticker, None)
 
     @property
     def version(self) -> int:

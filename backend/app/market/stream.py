@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Request
@@ -15,6 +16,8 @@ from .cache import PriceCache
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/stream", tags=["streaming"])
+
+KEEPALIVE_INTERVAL = 15.0  # seconds
 
 
 def create_stream_router(price_cache: PriceCache) -> APIRouter:
@@ -52,16 +55,21 @@ async def _generate_events(
     price_cache: PriceCache,
     request: Request,
     interval: float = 0.5,
+    keepalive_interval: float = KEEPALIVE_INTERVAL,
 ) -> AsyncGenerator[str, None]:
     """Async generator that yields SSE-formatted price events.
 
     Sends all prices every `interval` seconds. Stops when the client
-    disconnects (detected via request.is_disconnected()).
+    disconnects (detected via request.is_disconnected()). Sends a
+    `: keepalive` comment whenever `keepalive_interval` seconds pass with
+    no price data sent, so the client can distinguish an idle stream
+    (nothing changed) from a dropped connection.
     """
     # Tell the client to retry after 1 second if the connection drops
     yield "retry: 1000\n\n"
 
     last_version = -1
+    last_send = time.monotonic()
     client_ip = request.client.host if request.client else "unknown"
     logger.info("SSE client connected: %s", client_ip)
 
@@ -72,6 +80,7 @@ async def _generate_events(
                 logger.info("SSE client disconnected: %s", client_ip)
                 break
 
+            now = time.monotonic()
             current_version = price_cache.version
             if current_version != last_version:
                 last_version = current_version
@@ -81,6 +90,10 @@ async def _generate_events(
                     data = {ticker: update.to_dict() for ticker, update in prices.items()}
                     payload = json.dumps(data)
                     yield f"data: {payload}\n\n"
+                    last_send = now
+            elif now - last_send >= keepalive_interval:
+                yield ": keepalive\n\n"
+                last_send = now
 
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
