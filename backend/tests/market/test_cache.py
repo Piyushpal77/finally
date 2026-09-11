@@ -101,3 +101,58 @@ class TestPriceCache:
         cache = PriceCache()
         update = cache.update("AAPL", 190.12345)
         assert update.price == 190.12
+
+
+class TestPriceCacheAnchor:
+    """Unit tests for the day-change anchor tracked alongside each ticker's price."""
+
+    def test_first_update_sets_anchor_to_price(self):
+        """With no explicit anchor, the first observed price becomes the anchor."""
+        cache = PriceCache()
+        update = cache.update("AAPL", 190.00)
+        assert update.anchor == 190.00
+
+    def test_explicit_anchor_used_on_first_update(self):
+        cache = PriceCache()
+        update = cache.update("AAPL", 190.00, anchor=185.50)
+        assert update.anchor == 185.50
+
+    def test_anchor_is_sticky_across_updates(self):
+        """A later call's anchor argument is ignored once one has been captured."""
+        cache = PriceCache()
+        cache.update("AAPL", 190.00, anchor=185.50)
+        update = cache.update("AAPL", 192.00, anchor=999.00)
+        assert update.anchor == 185.50
+
+    def test_anchor_sticky_without_explicit_anchor_on_later_calls(self):
+        """Later calls without an anchor argument still keep the first-captured anchor."""
+        cache = PriceCache()
+        cache.update("AAPL", 190.00, anchor=185.50)
+        update = cache.update("AAPL", 192.00)
+        assert update.anchor == 185.50
+
+    def test_day_change_percent(self):
+        cache = PriceCache()
+        cache.update("AAPL", 190.00, anchor=100.00)
+        update = cache.update("AAPL", 200.00)
+        assert update.day_change == 100.00
+        assert update.day_change_percent == 100.0
+
+    def test_remove_drops_anchor(self):
+        """Removing a ticker clears its anchor so re-tracking re-anchors fresh."""
+        cache = PriceCache()
+        cache.update("AAPL", 190.00, anchor=185.50)
+        cache.remove("AAPL")
+        update = cache.update("AAPL", 300.00)
+        assert update.anchor == 300.00
+
+    def test_get_anchor(self):
+        cache = PriceCache()
+        cache.update("AAPL", 190.00, anchor=185.50)
+        assert cache.get_anchor("AAPL") == 185.50
+        assert cache.get_anchor("NOPE") is None
+
+    def test_anchor_rounded_to_two_decimals(self):
+        cache = PriceCache()
+        update = cache.update("AAPL", 190.00, anchor=185.5049)
+        assert update.anchor == 185.50
